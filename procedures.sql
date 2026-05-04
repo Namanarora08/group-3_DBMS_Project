@@ -1,144 +1,114 @@
--- PART 1: TRIGGERS
+-- =========================================
+-- PROCEDURAL: DATA + QUERIES + LOGIC
+-- =========================================
 
--- TRIGGER 1: Prevent assigning a non-vacant room to a student
+-- INSERT DATA
+INSERT INTO rooms VALUES
+('A102',2,'Vacant',1,'Double'),
+('A118',1,'Vacant',1,'Single'),
+('B201',4,'Vacant',2,'Quad'),
+('C302',2,'Vacant',3,'Double'),
+('C304',2,'Vacant',3,'Double');
 
-CREATE OR REPLACE FUNCTION check_room_vacancy()
-DECLARE
-    v_status VARCHAR(20);
+INSERT INTO staff (name,position,contact_no,salary)
+VALUES
+('Harpreet Singh','Warden','09876543210',45000),
+('Meena Devi','Caretaker','09765432109',28000);
+
+INSERT INTO students (roll_no,name,department,room_no,year)
+VALUES
+('102303001','Arunima','ECE','A118','2nd'),
+('102303002','Saurabh','EE','A102','2nd');
+
+INSERT INTO fees (roll_no,amount,due_date,status)
+VALUES
+('102303001',50000,'2025-06-30','Paid'),
+('102303002',50000,'2025-06-30','Unpaid');
+
+-- =========================================
+-- QUERIES
+-- =========================================
+
+SELECT * FROM students;
+
+SELECT * FROM rooms WHERE status='Vacant';
+
+SELECT f.*, s.name 
+FROM fees f
+JOIN students s ON f.roll_no=s.roll_no
+WHERE f.status!='Paid';
+
+-- =========================================
+-- TRIGGERS
+-- =========================================
+
+GO
+CREATE TRIGGER tr_check_room
+ON students
+INSTEAD OF INSERT
+AS
 BEGIN
-    IF NEW.room_no IS NULL THEN
-        RETURN NEW;
-    END IF;
+    IF EXISTS (
+        SELECT 1 FROM inserted i
+        JOIN rooms r ON i.room_no = r.room_no
+        WHERE r.status != 'Vacant'
+    )
+    BEGIN
+        RAISERROR('Room not vacant',16,1);
+        ROLLBACK;
+        RETURN;
+    END
 
-    SELECT status INTO v_status FROM rooms WHERE room_no = NEW.room_no;
-
-    IF v_status != 'Vacant' THEN
-        RAISE EXCEPTION 'Room % is not vacant (current status: %)', NEW.room_no, v_status;
-    END IF;
-
-    RETURN NEW;
+    INSERT INTO students
+    SELECT * FROM inserted;
 END;
+GO
 
-CREATE TRIGGER tr_check_room_vacancy
-BEFORE INSERT OR UPDATE ON students
-FOR EACH ROW
-EXECUTE FUNCTION check_room_vacancy();
-
--- TRIGGER 2: Auto-update room status on student insert/delete
-
-CREATE OR REPLACE FUNCTION update_room_status()
+GO
+CREATE TRIGGER tr_update_room
+ON students
+AFTER INSERT, DELETE
+AS
 BEGIN
-    IF TG_OP = 'INSERT' AND NEW.room_no IS NOT NULL THEN
-        UPDATE rooms SET status = 'Occupied' WHERE room_no = NEW.room_no;
+    UPDATE rooms
+    SET status = 'Occupied'
+    WHERE room_no IN (SELECT room_no FROM inserted);
 
-    ELSIF TG_OP = 'DELETE' AND OLD.room_no IS NOT NULL THEN
-        UPDATE rooms SET status = 'Vacant' WHERE room_no = OLD.room_no;
-    END IF;
-
-    RETURN NEW;
+    UPDATE rooms
+    SET status = 'Vacant'
+    WHERE room_no IN (SELECT room_no FROM deleted);
 END;
+GO
 
-CREATE TRIGGER tr_update_room_status
-AFTER INSERT OR DELETE ON students
-FOR EACH ROW
-EXECUTE FUNCTION update_room_status();
+-- =========================================
+-- STORED PROCEDURES
+-- =========================================
 
--- TRIGGER 3: Auto-set date_resolved when complaint is resolved
-
-CREATE OR REPLACE FUNCTION auto_resolve_date()
+GO
+CREATE PROCEDURE get_vacant_rooms
+AS
 BEGIN
-    IF NEW.status = 'Resolved' AND OLD.status != 'Resolved' THEN
-        NEW.date_resolved := CURRENT_TIMESTAMP;
-    END IF;
-    RETURN NEW;
+    SELECT * FROM rooms WHERE status='Vacant';
 END;
+GO
 
-CREATE TRIGGER tr_auto_resolve_date
-BEFORE UPDATE ON complaints
-FOR EACH ROW
-EXECUTE FUNCTION auto_resolve_date();
-
--- PART 2: FUNCTIONS
-
-CREATE OR REPLACE FUNCTION get_vacant_rooms()
-RETURNS TABLE (
-    room_no   VARCHAR,
-    room_type VARCHAR,
-    capacity  INT,
-    floor     INT
-) AS $$
+GO
+CREATE PROCEDURE get_pending_fees
+AS
 BEGIN
-    RETURN QUERY
-        SELECT r.room_no, r.room_type, r.capacity, r.floor
-        FROM   rooms r
-        WHERE  r.status = 'Vacant'
-        ORDER  BY r.floor, r.room_no;
+    SELECT f.*, s.name
+    FROM fees f
+    JOIN students s ON f.roll_no=s.roll_no
+    WHERE f.status!='Paid';
 END;
-$$ LANGUAGE plpgsql;
+GO
 
-CREATE OR REPLACE FUNCTION get_pending_fees()
-RETURNS TABLE (
-    fee_id       INT,
-    roll_no      VARCHAR,
-    student_name VARCHAR,
-    amount       DECIMAL,
-    due_date     DATE,
-    status       VARCHAR
-) AS $$
+GO
+CREATE PROCEDURE complaint_summary
+AS
 BEGIN
-    RETURN QUERY
-        SELECT f.fee_id, f.roll_no, s.name,
-               f.amount, f.due_date, f.status
-        FROM   fees f
-        JOIN   students s ON f.roll_no = s.roll_no
-        WHERE  f.status != 'Paid'
-        ORDER  BY f.due_date;
+    SELECT status, COUNT(*) total
+    FROM complaints
+    GROUP BY status;
 END;
-$$ LANGUAGE plpgsql;
-
-CREATE OR REPLACE FUNCTION get_complaint_summary()
-RETURNS TABLE (
-    status VARCHAR,
-    total  BIGINT
-) AS $$
-BEGIN
-    RETURN QUERY
-        SELECT c.status, COUNT(*) AS total
-        FROM   complaints c
-        GROUP  BY c.status
-        ORDER  BY c.status;
-END;
-$$ LANGUAGE plpgsql;
-
--- PART 3: CURSOR (Simple Example)
-
-CREATE OR REPLACE FUNCTION cursor_active_students()
-RETURNS TABLE (
-    roll_no    VARCHAR,
-    name       VARCHAR,
-    department VARCHAR,
-    room_no    VARCHAR,
-    year       VARCHAR
-) AS $$
-DECLARE
-    cur CURSOR FOR
-        SELECT s.roll_no, s.name, s.department, s.room_no, s.year
-        FROM   students s
-        WHERE  s.status = 'Active'
-        ORDER  BY s.department;
-    rec RECORD;
-BEGIN
-    OPEN cur;
-    LOOP
-        FETCH cur INTO rec;
-        EXIT WHEN NOT FOUND;
-        roll_no    := rec.roll_no;
-        name       := rec.name;
-        department := rec.department;
-        room_no    := rec.room_no;
-        year       := rec.year;
-        RETURN NEXT;
-    END LOOP;
-    CLOSE cur;
-END;
-$$ LANGUAGE plpgsql;
+GO
